@@ -17,6 +17,9 @@ on:
           - deploy
           - build-test-deploy
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  
 # Voorkom dat dezelfde tenant tegelijk twee runs heeft
 concurrency:
   group: tenant-${{ github.event.inputs.tenant_id }}
@@ -31,7 +34,7 @@ jobs:
     outputs:
       tenant_path: ${{ steps.check.outputs.tenant_path }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Controleer tenant-folder
         id: check
@@ -58,7 +61,7 @@ jobs:
         working-directory: ${{ needs.validate.outputs.tenant_path }}/backend
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Python instellen
         uses: actions/setup-python@v5
@@ -98,7 +101,7 @@ jobs:
         working-directory: ${{ needs.validate.outputs.tenant_path }}/frontend
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Node.js instellen
         uses: actions/setup-node@v4
@@ -113,7 +116,7 @@ jobs:
 
       - name: Verwijder Zone.Identifier bestanden
         run: find . -name "*Zone.Identifier*" -delete
-        
+
       - name: Upload frontend artifact
         uses: actions/upload-artifact@v4
         with:
@@ -134,7 +137,7 @@ jobs:
         working-directory: ${{ needs.validate.outputs.tenant_path }}/backend
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Python instellen
         uses: actions/setup-python@v5
@@ -169,7 +172,7 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Download frontend artifact
         uses: actions/download-artifact@v4
@@ -195,7 +198,7 @@ jobs:
       github.event.inputs.action == 'build-test-deploy'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Install Railway CLI
         run: npm install -g @railway/cli
