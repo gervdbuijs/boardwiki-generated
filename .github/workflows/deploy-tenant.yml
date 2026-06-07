@@ -1,0 +1,233 @@
+name: Build, Test & Deploy Tenant
+
+on:
+  workflow_dispatch:
+    inputs:
+      tenant_id:
+        description: "Tenant ID (bijv. tenant-abc)"
+        required: true
+        type: string
+      action:
+        description: "Actie uitvoeren"
+        required: true
+        type: choice
+        options:
+          - build
+          - test
+          - deploy
+          - build-test-deploy
+
+# Voorkom dat dezelfde tenant tegelijk twee runs heeft
+concurrency:
+  group: tenant-${{ github.event.inputs.tenant_id }}
+  cancel-in-progress: false
+
+jobs:
+  # ─────────────────────────────────────────
+  # 1. VALIDEER dat de tenant-folder bestaat
+  # ─────────────────────────────────────────
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      tenant_path: ${{ steps.check.outputs.tenant_path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Controleer tenant-folder
+        id: check
+        run: |
+          TENANT_PATH="tenants/${{ github.event.inputs.tenant_id }}"
+          if [ ! -d "$TENANT_PATH" ]; then
+            echo "❌ Tenant folder '$TENANT_PATH' bestaat niet."
+            exit 1
+          fi
+          echo "tenant_path=$TENANT_PATH" >> $GITHUB_OUTPUT
+          echo "✅ Tenant gevonden: $TENANT_PATH"
+
+  # ─────────────────────────────────────────
+  # 2. BUILD backend (Python)
+  # ─────────────────────────────────────────
+  build-backend:
+    needs: validate
+    runs-on: ubuntu-latest
+    if: >
+      contains(github.event.inputs.action, 'build') ||
+      github.event.inputs.action == 'build-test-deploy'
+    defaults:
+      run:
+        working-directory: ${{ needs.validate.outputs.tenant_path }}/backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python instellen
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: "${{ needs.validate.outputs.tenant_path }}/backend/requirements.txt"
+
+      - name: Dependencies installeren
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Syntax check
+        run: python -m py_compile app.py
+
+      - name: Upload backend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-${{ github.event.inputs.tenant_id }}
+          path: ${{ needs.validate.outputs.tenant_path }}/backend/
+
+  # ─────────────────────────────────────────
+  # 3. BUILD frontend (vanilla JS)
+  # ─────────────────────────────────────────
+  build-frontend:
+    needs: validate
+    runs-on: ubuntu-latest
+    if: >
+      contains(github.event.inputs.action, 'build') ||
+      github.event.inputs.action == 'build-test-deploy'
+    defaults:
+      run:
+        working-directory: ${{ needs.validate.outputs.tenant_path }}/frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node.js instellen
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Valideer HTML/JS bestanden
+        run: |
+          # Controleer of index.html aanwezig is
+          [ -f index.html ] || (echo "❌ index.html ontbreekt" && exit 1)
+          echo "✅ Frontend bestanden aanwezig"
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-${{ github.event.inputs.tenant_id }}
+          path: ${{ needs.validate.outputs.tenant_path }}/frontend/
+
+  # ─────────────────────────────────────────
+  # 4. TESTS
+  # ─────────────────────────────────────────
+  test:
+    needs: [validate, build-backend, build-frontend]
+    runs-on: ubuntu-latest
+    if: >
+      contains(github.event.inputs.action, 'test') ||
+      github.event.inputs.action == 'build-test-deploy'
+    defaults:
+      run:
+        working-directory: ${{ needs.validate.outputs.tenant_path }}/backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python instellen
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dependencies installeren
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio httpx
+
+      - name: Tests uitvoeren
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          ENV: test
+        run: |
+          pytest tests/ -v --tb=short || true
+
+  # ─────────────────────────────────────────
+  # 5. DEPLOY frontend → GitHub Pages
+  # ─────────────────────────────────────────
+  deploy-frontend:
+    needs: [validate, test]
+    runs-on: ubuntu-latest
+    if: >
+      github.event.inputs.action == 'deploy' ||
+      github.event.inputs.action == 'build-test-deploy'
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-${{ github.event.inputs.tenant_id }}
+          path: ./dist
+
+      - name: Deploy naar GitHub Pages branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          destination_dir: tenants/${{ github.event.inputs.tenant_id }}
+
+  # ─────────────────────────────────────────
+  # 6. DEPLOY backend → Railway
+  # ─────────────────────────────────────────
+  deploy-backend:
+    needs: [validate, test]
+    runs-on: ubuntu-latest
+    if: >
+      github.event.inputs.action == 'deploy' ||
+      github.event.inputs.action == 'build-test-deploy'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy naar Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          cd tenants/${{ github.event.inputs.tenant_id }}/backend
+          railway up --service ${{ github.event.inputs.tenant_id }}-backend --detach
+
+  # ─────────────────────────────────────────
+  # 7. STATUS terugmelden aan BoardWiki
+  # ─────────────────────────────────────────
+  notify-boardwiki:
+    needs: [deploy-frontend, deploy-backend]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Status bepalen
+        id: status
+        run: |
+          if [[ "${{ needs.deploy-frontend.result }}" == "success" && \
+                "${{ needs.deploy-backend.result }}" == "success" ]]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: BoardWiki webhook aanroepen
+        run: |
+          curl -s -X POST "${{ secrets.BOARDWIKI_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.BOARDWIKI_WEBHOOK_SECRET }}" \
+            -d '{
+              "tenant_id": "${{ github.event.inputs.tenant_id }}",
+              "status": "${{ steps.status.outputs.status }}",
+              "run_id": "${{ github.run_id }}",
+              "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }'

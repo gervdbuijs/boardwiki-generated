@@ -1,0 +1,18 @@
+{
+  "tenant_id": "tenant-example",
+  "display_name": "Voorbeeld Tenant",
+  "generated_at": "2026-06-07T00:00:00Z",
+  "generated_by": "boardwiki-ai",
+  "version": "1.0.0",
+  "stack": {
+    "backend": "python-fastapi",
+    "frontend": "vanilla-js",
+    "database": "mongodb-atlas"
+  },
+  "deployment": {
+    "frontend_url": "",
+    "backend_url": "",
+    "last_deployed_at": null,
+    "status": "pending"
+  }
+}
