@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>tenant-example</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>tenant-example</h1>
+    <p class="subtitle">Gegenereerd door BoardWiki</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Items</h2>
+      <div id="items-list">Laden...</div>
+
+      <form id="add-form">
+        <input type="text" id="item-name" placeholder="Naam" required />
+        <input type="text" id="item-desc" placeholder="Omschrijving (optioneel)" />
+        <button type="submit">Toevoegen</button>
+      </form>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
