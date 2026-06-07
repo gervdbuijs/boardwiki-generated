@@ -180,6 +180,11 @@ jobs:
           name: frontend-${{ github.event.inputs.tenant_id }}
           path: ./dist
 
+      - name: Verplaats frontend bestanden naar root
+        run: |
+          mv ./dist/frontend/* ./dist/
+          rm -rf ./dist/frontend
+      
       - name: Deploy naar GitHub Pages branch
         uses: peaceiris/actions-gh-pages@v4
         with:
