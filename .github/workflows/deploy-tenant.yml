@@ -75,6 +75,9 @@ jobs:
       - name: Syntax check
         run: python -m py_compile app.py
 
+      - name: Verwijder Zone.Identifier bestanden
+        run: find . -name "*Zone.Identifier*" -delete
+
       - name: Upload backend artifact
         uses: actions/upload-artifact@v4
         with:
@@ -108,6 +111,9 @@ jobs:
           [ -f index.html ] || (echo "❌ index.html ontbreekt" && exit 1)
           echo "✅ Frontend bestanden aanwezig"
 
+      - name: Verwijder Zone.Identifier bestanden
+        run: find . -name "*Zone.Identifier*" -delete
+        
       - name: Upload frontend artifact
         uses: actions/upload-artifact@v4
         with:
