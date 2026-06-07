@@ -20,3 +20,4 @@ Thumbs.db
 # Test output
 .pytest_cache/
 htmlcov/
+*Zone.Identifier*
