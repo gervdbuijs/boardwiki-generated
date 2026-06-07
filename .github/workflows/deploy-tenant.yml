@@ -180,6 +180,9 @@ jobs:
           name: frontend-${{ github.event.inputs.tenant_id }}
           path: ./dist
 
+      - name: Debug dist inhoud
+        run: ls -la ./dist/
+        
       - name: Verplaats frontend bestanden naar root
         run: |
           mv ./dist/frontend/* ./dist/
