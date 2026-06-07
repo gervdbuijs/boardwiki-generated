@@ -69,3 +69,10 @@ async def delete_item(item_id: str):
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Item niet gevonden")
     return {"deleted": item_id}
+
+@app.get("/debug")
+async def debug():
+    return {
+        "allowed_origins": ALLOWED_ORIGINS,
+        "mongodb_uri_set": bool(MONGODB_URI),
+    }
