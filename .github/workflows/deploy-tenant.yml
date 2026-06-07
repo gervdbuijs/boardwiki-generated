@@ -19,7 +19,7 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  
+
 # Voorkom dat dezelfde tenant tegelijk twee runs heeft
 concurrency:
   group: tenant-${{ github.event.inputs.tenant_id }}
@@ -188,7 +188,7 @@ jobs:
           destination_dir: tenants/${{ github.event.inputs.tenant_id }}
 
   # ─────────────────────────────────────────
-  # 6. DEPLOY backend → Railway
+  # 6. DEPLOY backend →  Render 
   # ─────────────────────────────────────────
   deploy-backend:
     needs: [validate, test]
@@ -203,13 +203,16 @@ jobs:
       - name: Install Railway CLI
         run: npm install -g @railway/cli
 
-      - name: Deploy naar Railway
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+#      - name: Deploy naar Railway
+#        env:
+#          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+#        run: |
+#          cd tenants/${{ github.event.inputs.tenant_id }}/backend
+#          railway up --service ${{ github.event.inputs.tenant_id }}-backend --detach
+      - name: Trigger Render deploy hook
         run: |
-          cd tenants/${{ github.event.inputs.tenant_id }}/backend
-          railway up --service ${{ github.event.inputs.tenant_id }}-backend --detach
-
+          curl -s -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}" | \
+          grep -q '"id"' && echo "✅ Deploy getriggerd" || echo "❌ Deploy mislukt"
   # ─────────────────────────────────────────
   # 7. STATUS terugmelden aan BoardWiki
   # ─────────────────────────────────────────
