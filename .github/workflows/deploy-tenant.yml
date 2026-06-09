@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tenant_id:
-        description: "Tenant ID (bijv. tenant-abc)"
+        description: "Tenant ID (bijv. org-507f1f77bcf86cd799439011)"
         required: true
         type: string
       action:
@@ -22,17 +22,18 @@ env:
 
 # Voorkom dat dezelfde tenant tegelijk twee runs heeft
 concurrency:
-  group: tenant-${{ github.event.inputs.tenant_id }}
+  group: tenant-${{ github.event.inputs.tenant_id }}-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   # ─────────────────────────────────────────
-  # 1. VALIDEER dat de tenant-folder bestaat
+  # 1. VALIDEER tenant-folder en branch
   # ─────────────────────────────────────────
   validate:
     runs-on: ubuntu-latest
     outputs:
       tenant_path: ${{ steps.check.outputs.tenant_path }}
+      branch:      ${{ steps.check.outputs.branch }}
     steps:
       - uses: actions/checkout@v4.2.2
 
@@ -45,7 +46,8 @@ jobs:
             exit 1
           fi
           echo "tenant_path=$TENANT_PATH" >> $GITHUB_OUTPUT
-          echo "✅ Tenant gevonden: $TENANT_PATH"
+          echo "branch=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          echo "✅ Tenant gevonden: $TENANT_PATH op branch ${GITHUB_REF_NAME}"
 
   # ─────────────────────────────────────────
   # 2. BUILD backend (Python)
@@ -73,7 +75,7 @@ jobs:
       - name: Dependencies installeren
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --only-binary=:all: -r requirements.txt
 
       - name: Syntax check
         run: python -m py_compile app.py
@@ -82,7 +84,7 @@ jobs:
         run: find . -name "*Zone.Identifier*" -delete
 
       - name: Upload backend artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.2.2
         with:
           name: backend-${{ github.event.inputs.tenant_id }}
           path: ${{ needs.validate.outputs.tenant_path }}/backend/
@@ -104,13 +106,12 @@ jobs:
       - uses: actions/checkout@v4.2.2
 
       - name: Node.js instellen
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4.2.2
         with:
           node-version: "20"
 
       - name: Valideer HTML/JS bestanden
         run: |
-          # Controleer of index.html aanwezig is
           [ -f index.html ] || (echo "❌ index.html ontbreekt" && exit 1)
           echo "✅ Frontend bestanden aanwezig"
 
@@ -118,7 +119,7 @@ jobs:
         run: find . -name "*Zone.Identifier*" -delete
 
       - name: Upload frontend artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.2.2
         with:
           name: frontend-${{ github.event.inputs.tenant_id }}
           path: ${{ needs.validate.outputs.tenant_path }}/frontend/
@@ -147,7 +148,7 @@ jobs:
       - name: Dependencies installeren
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --only-binary=:all: -r requirements.txt
           pip install pytest pytest-asyncio httpx
 
       - name: Tests uitvoeren
@@ -159,13 +160,15 @@ jobs:
 
   # ─────────────────────────────────────────
   # 5. DEPLOY frontend → GitHub Pages
+  #    Alleen vanuit tenant/* branches
   # ─────────────────────────────────────────
   deploy-frontend:
     needs: [validate, test]
     runs-on: ubuntu-latest
     if: >
-      github.event.inputs.action == 'deploy' ||
-      github.event.inputs.action == 'build-test-deploy'
+      (github.event.inputs.action == 'deploy' ||
+      github.event.inputs.action == 'build-test-deploy') &&
+      startsWith(github.ref_name, 'tenant/')
     permissions:
       contents: write
       pages: write
@@ -175,19 +178,12 @@ jobs:
       - uses: actions/checkout@v4.2.2
 
       - name: Download frontend artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.2.2
         with:
           name: frontend-${{ github.event.inputs.tenant_id }}
           path: ./dist
 
-#      - name: Debug dist inhoud
-#        run: ls -la ./dist/
-#      - name: Verplaats frontend bestanden naar root
-#        run: |
-#          mv ./dist/frontend/* ./dist/
-#          rm -rf ./dist/frontend
-      
-      - name: Deploy naar GitHub Pages branch
+      - name: Deploy naar GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -195,36 +191,11 @@ jobs:
           destination_dir: tenants/${{ github.event.inputs.tenant_id }}
 
   # ─────────────────────────────────────────
-  # 6. DEPLOY backend →  Render 
-  # ─────────────────────────────────────────
-  deploy-backend:
-    needs: [validate, test]
-    runs-on: ubuntu-latest
-    if: >
-      github.event.inputs.action == 'deploy' ||
-      github.event.inputs.action == 'build-test-deploy'
-
-    steps:
-      - uses: actions/checkout@v4.2.2
-
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-
-#      - name: Deploy naar Railway
-#        env:
-#          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-#        run: |
-#          cd tenants/${{ github.event.inputs.tenant_id }}/backend
-#          railway up --service ${{ github.event.inputs.tenant_id }}-backend --detach
-      - name: Trigger Render deploy hook
-        run: |
-          curl -s -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}" | \
-          grep -q '"id"' && echo "✅ Deploy getriggerd" || echo "❌ Deploy mislukt"
-  # ─────────────────────────────────────────
-  # 7. STATUS terugmelden aan BoardWiki
+  # 6. STATUS terugmelden aan BoardWiki
+  #    BoardWiki triggert zelf de Render deploy
   # ─────────────────────────────────────────
   notify-boardwiki:
-    needs: [deploy-frontend, deploy-backend]
+    needs: [validate, build-backend, build-frontend, test, deploy-frontend]
     runs-on: ubuntu-latest
     if: always()
 
@@ -232,21 +203,50 @@ jobs:
       - name: Status bepalen
         id: status
         run: |
-          if [[ "${{ needs.deploy-frontend.result }}" == "success" && \
-                "${{ needs.deploy-backend.result }}" == "success" ]]; then
-            echo "status=success" >> $GITHUB_OUTPUT
+          # Bij build-test-deploy: alle jobs moeten geslaagd zijn
+          # Bij build: alleen build jobs
+          ACTION="${{ github.event.inputs.action }}"
+          
+          if [[ "$ACTION" == "build-test-deploy" ]]; then
+            if [[ "${{ needs.deploy-frontend.result }}" == "success" ]]; then
+              echo "status=success" >> $GITHUB_OUTPUT
+            else
+              echo "status=failed" >> $GITHUB_OUTPUT
+            fi
+          elif [[ "$ACTION" == "build" ]]; then
+            if [[ "${{ needs.build-backend.result }}" == "success" && \
+                  "${{ needs.build-frontend.result }}" == "success" ]]; then
+              echo "status=success" >> $GITHUB_OUTPUT
+            else
+              echo "status=failed" >> $GITHUB_OUTPUT
+            fi
+          elif [[ "$ACTION" == "test" ]]; then
+            if [[ "${{ needs.test.result }}" == "success" ]]; then
+              echo "status=success" >> $GITHUB_OUTPUT
+            else
+              echo "status=failed" >> $GITHUB_OUTPUT
+            fi
           else
             echo "status=failed" >> $GITHUB_OUTPUT
           fi
 
       - name: BoardWiki webhook aanroepen
         run: |
-          curl -s -X POST "${{ secrets.BOARDWIKI_WEBHOOK_URL }}" \
+          PAYLOAD=$(cat <<EOF
+          {
+            "tenant_id": "${{ github.event.inputs.tenant_id }}",
+            "action": "${{ github.event.inputs.action }}",
+            "status": "${{ steps.status.outputs.status }}",
+            "run_id": "${{ github.run_id }}",
+            "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "branch": "${{ github.ref_name }}"
+          }
+          EOF
+          )
+          
+          SIGNATURE="sha256=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "${{ secrets.BOARDWIKI_WEBHOOK_SECRET }}" | cut -d' ' -f2)"
+          
+          curl -s -X POST "${{ vars.BOARDWIKI_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${{ secrets.BOARDWIKI_WEBHOOK_SECRET }}" \
-            -d '{
-              "tenant_id": "${{ github.event.inputs.tenant_id }}",
-              "status": "${{ steps.status.outputs.status }}",
-              "run_id": "${{ github.run_id }}",
-              "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            }'
+            -H "X-Hub-Signature-256: $SIGNATURE" \
+            -d "$PAYLOAD"

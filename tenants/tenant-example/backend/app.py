@@ -23,10 +23,18 @@ app = FastAPI(
     docs_url="/docs" if os.getenv("ENV") != "production" else None,
 )
 
+#app.add_middleware(
+#    CORSMiddleware,
+#    allow_origins=ALLOWED_ORIGINS,
+#    allow_methods=["*"],
+#    allow_headers=["*"],
+#)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["*"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -70,9 +78,3 @@ async def delete_item(item_id: str):
         raise HTTPException(status_code=404, detail="Item niet gevonden")
     return {"deleted": item_id}
 
-@app.get("/debug")
-async def debug():
-    return {
-        "allowed_origins": ALLOWED_ORIGINS,
-        "mongodb_uri_set": bool(MONGODB_URI),
-    }
