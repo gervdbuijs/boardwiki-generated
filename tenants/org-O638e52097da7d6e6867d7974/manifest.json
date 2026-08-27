@@ -1,0 +1,20 @@
+{
+  "tenant_id": "org-O638e52097da7d6e6867d7974",
+  "organization_id": "O638e52097da7d6e6867d7974",
+  "display_name": "BoardWiki Client",
+  "generated_at": "2026-08-27T13:54:37.737619+00:00",
+  "generated_by": "boardwiki-ai",
+  "version": "1.0.0",
+  "stack": {
+    "backend": "python-fastapi",
+    "frontend": "vanilla-js",
+    "database": "mongodb-atlas"
+  },
+  "blocks": [],
+  "deployment": {
+    "frontend_url": "",
+    "backend_url": "",
+    "last_deployed_at": null,
+    "status": "pending"
+  }
+}
