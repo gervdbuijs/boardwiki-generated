@@ -189,8 +189,8 @@ jobs:
             echo "ℹ️ Geen tests-map gevonden, overslaan."
           fi
 
-  # ─────────────────────────────────────────
-  # 5. DEPLOY frontend → GitHub Pages
+# ─────────────────────────────────────────
+  # 5. DEPLOY frontend (Productie, Acceptatie & Block Previews)
   # ─────────────────────────────────────────
   deploy-frontend:
     needs: [validate, test]
@@ -198,7 +198,7 @@ jobs:
     if: >
       needs.validate.outputs.has_frontend == 'true' &&
       (github.event.inputs.action == 'deploy' || github.event.inputs.action == 'build-test-deploy') &&
-      startsWith(github.ref_name, 'tenant/')
+      (startsWith(github.ref_name, 'tenant/') || startsWith(github.ref_name, 'feature/') || startsWith(github.ref_name, 'block/'))
     permissions:
       contents: write
       pages: write
@@ -213,13 +213,18 @@ jobs:
           name: frontend-${{ github.event.inputs.tenant_id }}
           path: ./dist
 
+      - name: Controleer inhoud van artifact voor deployment
+        run: |
+          echo "🔍 Inhoud van ./dist die wordt geüpload naar GitHub Pages:"
+          ls -la ./dist
+
       - name: Deploy naar GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./dist
-          destination_dir: tenants/${{ github.event.inputs.tenant_id }}
-
+          destination_dir: ${{ needs.validate.outputs.deploy_dir }}
+          keep_files: true # 👈 CRUCIAAL: Zorgt dat bestaande mappen/previews niet gewist/genegeerd worden!
   # ─────────────────────────────────────────
   # 6. STATUS terugmelden aan BoardWiki
   # ─────────────────────────────────────────
