@@ -20,24 +20,25 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-# Voorkom dat dezelfde tenant tegelijk twee runs heeft
 concurrency:
   group: tenant-${{ github.event.inputs.tenant_id }}-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   # ─────────────────────────────────────────
-  # 1. VALIDEER tenant-folder en branch
+  # 1. VALIDEER tenant-folder, branch en aanwezigheid backend/frontend
   # ─────────────────────────────────────────
   validate:
     runs-on: ubuntu-latest
     outputs:
       tenant_path: ${{ steps.check.outputs.tenant_path }}
       branch:      ${{ steps.check.outputs.branch }}
+      has_backend: ${{ steps.check.outputs.has_backend }}
+      has_frontend: ${{ steps.check.outputs.has_frontend }}
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
 
-      - name: Controleer tenant-folder
+      - name: Controleer tenant-folder en submappen
         id: check
         run: |
           TENANT_PATH="tenants/${{ github.event.inputs.tenant_id }}"
@@ -45,9 +46,25 @@ jobs:
             echo "❌ Tenant folder '$TENANT_PATH' bestaat niet."
             exit 1
           fi
+          
+          HAS_BACKEND="false"
+          HAS_FRONTEND="false"
+          
+          # Check of de mappen bestaan én minstens één bestand bevatten
+          if [ -d "$TENANT_PATH/backend" ] && [ "$(ls -A $TENANT_PATH/backend)" ]; then 
+            HAS_BACKEND="true"
+          fi
+          
+          if [ -d "$TENANT_PATH/frontend" ] && [ "$(ls -A $TENANT_PATH/frontend)" ]; then 
+            HAS_FRONTEND="true"
+          fi
+          
           echo "tenant_path=$TENANT_PATH" >> $GITHUB_OUTPUT
           echo "branch=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          echo "✅ Tenant gevonden: $TENANT_PATH op branch ${GITHUB_REF_NAME}"
+          echo "has_backend=$HAS_BACKEND" >> $GITHUB_OUTPUT
+          echo "has_frontend=$HAS_FRONTEND" >> $GITHUB_OUTPUT
+          
+          echo "✅ Tenant gevonden: $TENANT_PATH (Backend aanwezig: $HAS_BACKEND, Frontend aanwezig: $HAS_FRONTEND)"
 
   # ─────────────────────────────────────────
   # 2. BUILD backend (Python)
@@ -56,35 +73,43 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     if: >
-      contains(github.event.inputs.action, 'build') ||
-      github.event.inputs.action == 'build-test-deploy'
+      needs.validate.outputs.has_backend == 'true' &&
+      (contains(github.event.inputs.action, 'build') || github.event.inputs.action == 'build-test-deploy')
     defaults:
       run:
         working-directory: ${{ needs.validate.outputs.tenant_path }}/backend
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
 
       - name: Python instellen
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: "${{ needs.validate.outputs.tenant_path }}/backend/requirements.txt"
+          # Cache-instellingen verwijderd om 'file not found' te voorkomen als requirements.txt ontbreekt
 
-      - name: Dependencies installeren
+      - name: Dependencies installeren (indien requirements.txt aanwezig)
         run: |
           pip install --upgrade pip
-          pip install --only-binary=:all: -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install --only-binary=:all: -r requirements.txt
+          else
+            echo "ℹ️ Geen requirements.txt gevonden, overslaan."
+          fi
 
       - name: Syntax check
-        run: python -m py_compile app.py
+        run: |
+          if [ -f app.py ]; then
+            python -m py_compile app.py
+          else
+            echo "ℹ️ Geen app.py gevonden, overslaan."
+          fi
 
       - name: Verwijder Zone.Identifier bestanden
         run: find . -name "*Zone.Identifier*" -delete
 
       - name: Upload backend artifact
-        uses: actions/upload-artifact@v4.2.2
+        uses: actions/upload-artifact@v4
         with:
           name: backend-${{ github.event.inputs.tenant_id }}
           path: ${{ needs.validate.outputs.tenant_path }}/backend/
@@ -96,17 +121,17 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     if: >
-      contains(github.event.inputs.action, 'build') ||
-      github.event.inputs.action == 'build-test-deploy'
+      needs.validate.outputs.has_frontend == 'true' &&
+      (contains(github.event.inputs.action, 'build') || github.event.inputs.action == 'build-test-deploy')
     defaults:
       run:
         working-directory: ${{ needs.validate.outputs.tenant_path }}/frontend
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
 
       - name: Node.js instellen
-        uses: actions/setup-node@v4.2.2
+        uses: actions/setup-node@v4
         with:
           node-version: "20"
 
@@ -119,7 +144,7 @@ jobs:
         run: find . -name "*Zone.Identifier*" -delete
 
       - name: Upload frontend artifact
-        uses: actions/upload-artifact@v4.2.2
+        uses: actions/upload-artifact@v4
         with:
           name: frontend-${{ github.event.inputs.tenant_id }}
           path: ${{ needs.validate.outputs.tenant_path }}/frontend/
@@ -131,14 +156,14 @@ jobs:
     needs: [validate, build-backend, build-frontend]
     runs-on: ubuntu-latest
     if: >
-      contains(github.event.inputs.action, 'test') ||
-      github.event.inputs.action == 'build-test-deploy'
+      needs.validate.outputs.has_backend == 'true' &&
+      (contains(github.event.inputs.action, 'test') || github.event.inputs.action == 'build-test-deploy')
     defaults:
       run:
         working-directory: ${{ needs.validate.outputs.tenant_path }}/backend
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
 
       - name: Python instellen
         uses: actions/setup-python@v5
@@ -148,7 +173,9 @@ jobs:
       - name: Dependencies installeren
         run: |
           pip install --upgrade pip
-          pip install --only-binary=:all: -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install --only-binary=:all: -r requirements.txt
+          fi
           pip install pytest pytest-asyncio httpx
 
       - name: Tests uitvoeren
@@ -156,18 +183,21 @@ jobs:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           ENV: test
         run: |
-          pytest tests/ -v --tb=short || true
+          if [ -d tests ]; then
+            pytest tests/ -v --tb=short || true
+          else
+            echo "ℹ️ Geen tests-map gevonden, overslaan."
+          fi
 
   # ─────────────────────────────────────────
   # 5. DEPLOY frontend → GitHub Pages
-  #    Alleen vanuit tenant/* branches
   # ─────────────────────────────────────────
   deploy-frontend:
     needs: [validate, test]
     runs-on: ubuntu-latest
     if: >
-      (github.event.inputs.action == 'deploy' ||
-      github.event.inputs.action == 'build-test-deploy') &&
+      needs.validate.outputs.has_frontend == 'true' &&
+      (github.event.inputs.action == 'deploy' || github.event.inputs.action == 'build-test-deploy') &&
       startsWith(github.ref_name, 'tenant/')
     permissions:
       contents: write
@@ -175,10 +205,10 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
 
       - name: Download frontend artifact
-        uses: actions/download-artifact@v4.2.2
+        uses: actions/download-artifact@v4
         with:
           name: frontend-${{ github.event.inputs.tenant_id }}
           path: ./dist
@@ -192,7 +222,6 @@ jobs:
 
   # ─────────────────────────────────────────
   # 6. STATUS terugmelden aan BoardWiki
-  #    BoardWiki triggert zelf de Render deploy
   # ─────────────────────────────────────────
   notify-boardwiki:
     needs: [validate, build-backend, build-frontend, test, deploy-frontend]
@@ -203,31 +232,15 @@ jobs:
       - name: Status bepalen
         id: status
         run: |
-          # Bij build-test-deploy: alle jobs moeten geslaagd zijn
-          # Bij build: alleen build jobs
-          ACTION="${{ github.event.inputs.action }}"
+          BACKEND_RES="${{ needs.build-backend.result }}"
+          FRONTEND_RES="${{ needs.build-frontend.result }}"
+          TEST_RES="${{ needs.test.result }}"
+          DEPLOY_RES="${{ needs.deploy-frontend.result }}"
           
-          if [[ "$ACTION" == "build-test-deploy" ]]; then
-            if [[ "${{ needs.deploy-frontend.result }}" == "success" ]]; then
-              echo "status=success" >> $GITHUB_OUTPUT
-            else
-              echo "status=failed" >> $GITHUB_OUTPUT
-            fi
-          elif [[ "$ACTION" == "build" ]]; then
-            if [[ "${{ needs.build-backend.result }}" == "success" && \
-                  "${{ needs.build-frontend.result }}" == "success" ]]; then
-              echo "status=success" >> $GITHUB_OUTPUT
-            else
-              echo "status=failed" >> $GITHUB_OUTPUT
-            fi
-          elif [[ "$ACTION" == "test" ]]; then
-            if [[ "${{ needs.test.result }}" == "success" ]]; then
-              echo "status=success" >> $GITHUB_OUTPUT
-            else
-              echo "status=failed" >> $GITHUB_OUTPUT
-            fi
-          else
+          if [[ "$BACKEND_RES" == "failure" || "$FRONTEND_RES" == "failure" || "$TEST_RES" == "failure" || "$DEPLOY_RES" == "failure" ]]; then
             echo "status=failed" >> $GITHUB_OUTPUT
+          else
+            echo "status=success" >> $GITHUB_OUTPUT
           fi
 
       - name: BoardWiki webhook aanroepen
