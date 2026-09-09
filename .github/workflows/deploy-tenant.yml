@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   # ─────────────────────────────────────────
-  # 1. VALIDEER tenant-folder, branch en aanwezigheid backend/frontend
+  # 1. VALIDEER tenant-folder, branch en omgeving
   # ─────────────────────────────────────────
   validate:
     runs-on: ubuntu-latest
@@ -35,10 +35,11 @@ jobs:
       branch:      ${{ steps.check.outputs.branch }}
       has_backend: ${{ steps.check.outputs.has_backend }}
       has_frontend: ${{ steps.check.outputs.has_frontend }}
+      deploy_dir:  ${{ steps.check.outputs.deploy_dir }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Controleer tenant-folder en submappen
+      - name: Controleer tenant-folder en bepaal omgevingspad
         id: check
         run: |
           TENANT_PATH="tenants/${{ github.event.inputs.tenant_id }}"
@@ -50,24 +51,36 @@ jobs:
           HAS_BACKEND="false"
           HAS_FRONTEND="false"
           
-          # Check of de mappen bestaan én minstens één bestand bevatten
-          if [ -d "$TENANT_PATH/backend" ] && [ "$(ls -A $TENANT_PATH/backend)" ]; then 
-            HAS_BACKEND="true"
-          fi
+          if [ -d "$TENANT_PATH/backend" ] && [ "$(ls -A $TENANT_PATH/backend)" ]; then HAS_BACKEND="true"; fi
+          if [ -d "$TENANT_PATH/frontend" ] && [ "$(ls -A $TENANT_PATH/frontend)" ]; then HAS_FRONTEND="true"; fi
           
-          if [ -d "$TENANT_PATH/frontend" ] && [ "$(ls -A $TENANT_PATH/frontend)" ]; then 
-            HAS_FRONTEND="true"
+          BRANCH_NAME="${GITHUB_REF_NAME}"
+          
+          # Bepaal het uitrolpad op basis van het type branch:
+          # 1. Productie (tenant/*)        -> tenants/<tenant_id>
+          # 2. Acceptatie (feature/*)       -> staging/tenants/<tenant_id>
+          # 3. Block Preview (block/*)     -> preview/tenants/<tenant_id>/<block_naam>
+          
+          if [[ "$BRANCH_NAME" == block/* ]]; then
+            BLOCK_NAME=$(echo "$BRANCH_NAME" | sed 's/block\///; s/\//-/g')
+            DEPLOY_DIR="preview/tenants/${{ github.event.inputs.tenant_id }}/$BLOCK_NAME"
+          elif [[ "$BRANCH_NAME" == feature/* ]]; then
+            DEPLOY_DIR="staging/tenants/${{ github.event.inputs.tenant_id }}"
+          else
+            DEPLOY_DIR="tenants/${{ github.event.inputs.tenant_id }}"
           fi
           
           echo "tenant_path=$TENANT_PATH" >> $GITHUB_OUTPUT
-          echo "branch=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH_NAME" >> $GITHUB_OUTPUT
           echo "has_backend=$HAS_BACKEND" >> $GITHUB_OUTPUT
           echo "has_frontend=$HAS_FRONTEND" >> $GITHUB_OUTPUT
+          echo "deploy_dir=$DEPLOY_DIR" >> $GITHUB_OUTPUT
           
-          echo "✅ Tenant gevonden: $TENANT_PATH (Backend aanwezig: $HAS_BACKEND, Frontend aanwezig: $HAS_FRONTEND)"
+          echo "✅ Tenant gevonden: $TENANT_PATH (Backend: $HAS_BACKEND, Frontend: $HAS_FRONTEND)"
+          echo "📍 Uitrolpad ingesteld op: $DEPLOY_DIR"
 
   # ─────────────────────────────────────────
-  # 2. BUILD backend (Python)
+  # 2. BUILD backend
   # ─────────────────────────────────────────
   build-backend:
     needs: validate
@@ -86,23 +99,18 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          # Cache-instellingen verwijderd om 'file not found' te voorkomen als requirements.txt ontbreekt
 
-      - name: Dependencies installeren (indien requirements.txt aanwezig)
+      - name: Dependencies installeren
         run: |
           pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install --only-binary=:all: -r requirements.txt
-          else
-            echo "ℹ️ Geen requirements.txt gevonden, overslaan."
           fi
 
       - name: Syntax check
         run: |
           if [ -f app.py ]; then
             python -m py_compile app.py
-          else
-            echo "ℹ️ Geen app.py gevonden, overslaan."
           fi
 
       - name: Verwijder Zone.Identifier bestanden
@@ -115,7 +123,7 @@ jobs:
           path: ${{ needs.validate.outputs.tenant_path }}/backend/
 
   # ─────────────────────────────────────────
-  # 3. BUILD frontend (vanilla JS)
+  # 3. BUILD frontend
   # ─────────────────────────────────────────
   build-frontend:
     needs: validate
@@ -135,10 +143,31 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Valideer HTML/JS bestanden
+      - name: Zorg voor een index.html wrapper
         run: |
-          [ -f index.html ] || (echo "❌ index.html ontbreekt" && exit 1)
-          echo "✅ Frontend bestanden aanwezig"
+          # Als er geen index.html is, maar wel .js bestanden, genereer er automatisch een
+          if [ ! -f index.html ]; then
+            MAIN_JS=$(ls *.js 2>/dev/null | head -n 1 || echo "")
+            echo "⚠️ Geen index.html gevonden. Genereer automatische wrapper..."
+            cat <<EOF > index.html
+          <!DOCTYPE html>
+          <html lang="nl">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Tenant Block Preview</title>
+          </head>
+          <body>
+            <div id="root"></div>
+            <div id="app"></div>
+            ${MAIN_JS:+<script src="./$MAIN_JS"></script>}
+          </body>
+          </html>
+          EOF
+            echo "✅ Automatische index.html gegenereerd voor $MAIN_JS"
+          else
+            echo "✅ Bestaande index.html gevonden"
+          fi
 
       - name: Verwijder Zone.Identifier bestanden
         run: find . -name "*Zone.Identifier*" -delete
@@ -150,7 +179,7 @@ jobs:
           path: ${{ needs.validate.outputs.tenant_path }}/frontend/
 
   # ─────────────────────────────────────────
-  # 4. TESTS
+  # 4. TESTS (Unit vs Systeem)
   # ─────────────────────────────────────────
   test:
     needs: [validate, build-backend, build-frontend]
@@ -184,12 +213,18 @@ jobs:
           ENV: test
         run: |
           if [ -d tests ]; then
-            pytest tests/ -v --tb=short || true
+            if [[ "${{ needs.validate.outputs.branch }}" == block/* ]]; then
+              echo "🧪 Uitvoeren van specifieke Block/Unit Tests..."
+              pytest tests/unit/ -v --tb=short || pytest tests/ -m unit -v || true
+            else
+              echo "🧪 Uitvoeren van volledige Test Suite..."
+              pytest tests/ -v --tb=short || true
+            fi
           else
             echo "ℹ️ Geen tests-map gevonden, overslaan."
           fi
 
-# ─────────────────────────────────────────
+  # ─────────────────────────────────────────
   # 5. DEPLOY frontend (Productie, Acceptatie & Block Previews)
   # ─────────────────────────────────────────
   deploy-frontend:
@@ -224,9 +259,10 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./dist
           destination_dir: ${{ needs.validate.outputs.deploy_dir }}
-          keep_files: true # 👈 CRUCIAAL: Zorgt dat bestaande mappen/previews niet gewist/genegeerd worden!
+          keep_files: true
+
   # ─────────────────────────────────────────
-  # 6. STATUS terugmelden aan BoardWiki
+  # 6. STATUS terugmelden
   # ─────────────────────────────────────────
   notify-boardwiki:
     needs: [validate, build-backend, build-frontend, test, deploy-frontend]
@@ -257,7 +293,8 @@ jobs:
             "status": "${{ steps.status.outputs.status }}",
             "run_id": "${{ github.run_id }}",
             "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-            "branch": "${{ github.ref_name }}"
+            "branch": "${{ github.ref_name }}",
+            "environment_path": "${{ needs.validate.outputs.deploy_dir }}"
           }
           EOF
           )
