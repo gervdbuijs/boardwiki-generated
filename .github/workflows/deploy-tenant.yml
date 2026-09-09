@@ -20,24 +20,26 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-# Voorkom dat dezelfde tenant tegelijk twee runs heeft
 concurrency:
   group: tenant-${{ github.event.inputs.tenant_id }}-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   # ─────────────────────────────────────────
-  # 1. VALIDEER tenant-folder en branch
+  # 1. VALIDEER tenant-folder, branch en omgeving
   # ─────────────────────────────────────────
   validate:
     runs-on: ubuntu-latest
     outputs:
       tenant_path: ${{ steps.check.outputs.tenant_path }}
       branch:      ${{ steps.check.outputs.branch }}
+      has_backend: ${{ steps.check.outputs.has_backend }}
+      has_frontend: ${{ steps.check.outputs.has_frontend }}
+      deploy_dir:  ${{ steps.check.outputs.deploy_dir }}
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
 
-      - name: Controleer tenant-folder
+      - name: Controleer tenant-folder en bepaal omgevingspad
         id: check
         run: |
           TENANT_PATH="tenants/${{ github.event.inputs.tenant_id }}"
@@ -45,100 +47,152 @@ jobs:
             echo "❌ Tenant folder '$TENANT_PATH' bestaat niet."
             exit 1
           fi
+          
+          HAS_BACKEND="false"
+          HAS_FRONTEND="false"
+          
+          if [ -d "$TENANT_PATH/backend" ] && [ "$(ls -A $TENANT_PATH/backend)" ]; then HAS_BACKEND="true"; fi
+          if [ -d "$TENANT_PATH/frontend" ] && [ "$(ls -A $TENANT_PATH/frontend)" ]; then HAS_FRONTEND="true"; fi
+          
+          BRANCH_NAME="${GITHUB_REF_NAME}"
+          
+          # Bepaal het uitrolpad op basis van het type branch:
+          # 1. Productie (tenant/*)        -> tenants/<tenant_id>
+          # 2. Acceptatie (feature/*)       -> staging/tenants/<tenant_id>
+          # 3. Block Preview (block/*)     -> preview/tenants/<tenant_id>/<block_naam>
+          
+          if [[ "$BRANCH_NAME" == block/* ]]; then
+            BLOCK_NAME=$(echo "$BRANCH_NAME" | sed 's/block\///; s/\//-/g')
+            DEPLOY_DIR="preview/tenants/${{ github.event.inputs.tenant_id }}/$BLOCK_NAME"
+          elif [[ "$BRANCH_NAME" == feature/* ]]; then
+            DEPLOY_DIR="staging/tenants/${{ github.event.inputs.tenant_id }}"
+          else
+            DEPLOY_DIR="tenants/${{ github.event.inputs.tenant_id }}"
+          fi
+          
           echo "tenant_path=$TENANT_PATH" >> $GITHUB_OUTPUT
-          echo "branch=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          echo "✅ Tenant gevonden: $TENANT_PATH op branch ${GITHUB_REF_NAME}"
+          echo "branch=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "has_backend=$HAS_BACKEND" >> $GITHUB_OUTPUT
+          echo "has_frontend=$HAS_FRONTEND" >> $GITHUB_OUTPUT
+          echo "deploy_dir=$DEPLOY_DIR" >> $GITHUB_OUTPUT
+          
+          echo "✅ Tenant gevonden: $TENANT_PATH (Backend: $HAS_BACKEND, Frontend: $HAS_FRONTEND)"
+          echo "📍 Uitrolpad ingesteld op: $DEPLOY_DIR"
 
   # ─────────────────────────────────────────
-  # 2. BUILD backend (Python)
+  # 2. BUILD backend
   # ─────────────────────────────────────────
   build-backend:
     needs: validate
     runs-on: ubuntu-latest
     if: >
-      contains(github.event.inputs.action, 'build') ||
-      github.event.inputs.action == 'build-test-deploy'
+      needs.validate.outputs.has_backend == 'true' &&
+      (contains(github.event.inputs.action, 'build') || github.event.inputs.action == 'build-test-deploy')
     defaults:
       run:
         working-directory: ${{ needs.validate.outputs.tenant_path }}/backend
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
 
       - name: Python instellen
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: "${{ needs.validate.outputs.tenant_path }}/backend/requirements.txt"
 
       - name: Dependencies installeren
         run: |
           pip install --upgrade pip
-          pip install --only-binary=:all: -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install --only-binary=:all: -r requirements.txt
+          fi
 
       - name: Syntax check
-        run: python -m py_compile app.py
+        run: |
+          if [ -f app.py ]; then
+            python -m py_compile app.py
+          fi
 
       - name: Verwijder Zone.Identifier bestanden
         run: find . -name "*Zone.Identifier*" -delete
 
       - name: Upload backend artifact
-        uses: actions/upload-artifact@v4.2.2
+        uses: actions/upload-artifact@v4
         with:
           name: backend-${{ github.event.inputs.tenant_id }}
           path: ${{ needs.validate.outputs.tenant_path }}/backend/
 
   # ─────────────────────────────────────────
-  # 3. BUILD frontend (vanilla JS)
+  # 3. BUILD frontend
   # ─────────────────────────────────────────
   build-frontend:
     needs: validate
     runs-on: ubuntu-latest
     if: >
-      contains(github.event.inputs.action, 'build') ||
-      github.event.inputs.action == 'build-test-deploy'
+      needs.validate.outputs.has_frontend == 'true' &&
+      (contains(github.event.inputs.action, 'build') || github.event.inputs.action == 'build-test-deploy')
     defaults:
       run:
         working-directory: ${{ needs.validate.outputs.tenant_path }}/frontend
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
 
       - name: Node.js instellen
-        uses: actions/setup-node@v4.2.2
+        uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Valideer HTML/JS bestanden
+      - name: Zorg voor een index.html wrapper
         run: |
-          [ -f index.html ] || (echo "❌ index.html ontbreekt" && exit 1)
-          echo "✅ Frontend bestanden aanwezig"
+          # Als er geen index.html is, maar wel .js bestanden, genereer er automatisch een
+          if [ ! -f index.html ]; then
+            MAIN_JS=$(ls *.js 2>/dev/null | head -n 1 || echo "")
+            echo "⚠️ Geen index.html gevonden. Genereer automatische wrapper..."
+            cat <<EOF > index.html
+          <!DOCTYPE html>
+          <html lang="nl">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Tenant Block Preview</title>
+          </head>
+          <body>
+            <div id="root"></div>
+            <div id="app"></div>
+            ${MAIN_JS:+<script src="./$MAIN_JS"></script>}
+          </body>
+          </html>
+          EOF
+            echo "✅ Automatische index.html gegenereerd voor $MAIN_JS"
+          else
+            echo "✅ Bestaande index.html gevonden"
+          fi
 
       - name: Verwijder Zone.Identifier bestanden
         run: find . -name "*Zone.Identifier*" -delete
 
       - name: Upload frontend artifact
-        uses: actions/upload-artifact@v4.2.2
+        uses: actions/upload-artifact@v4
         with:
           name: frontend-${{ github.event.inputs.tenant_id }}
           path: ${{ needs.validate.outputs.tenant_path }}/frontend/
 
   # ─────────────────────────────────────────
-  # 4. TESTS
+  # 4. TESTS (Unit vs Systeem)
   # ─────────────────────────────────────────
   test:
     needs: [validate, build-backend, build-frontend]
     runs-on: ubuntu-latest
     if: >
-      contains(github.event.inputs.action, 'test') ||
-      github.event.inputs.action == 'build-test-deploy'
+      needs.validate.outputs.has_backend == 'true' &&
+      (contains(github.event.inputs.action, 'test') || github.event.inputs.action == 'build-test-deploy')
     defaults:
       run:
         working-directory: ${{ needs.validate.outputs.tenant_path }}/backend
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
 
       - name: Python instellen
         uses: actions/setup-python@v5
@@ -148,7 +202,9 @@ jobs:
       - name: Dependencies installeren
         run: |
           pip install --upgrade pip
-          pip install --only-binary=:all: -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install --only-binary=:all: -r requirements.txt
+          fi
           pip install pytest pytest-asyncio httpx
 
       - name: Tests uitvoeren
@@ -156,43 +212,57 @@ jobs:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           ENV: test
         run: |
-          pytest tests/ -v --tb=short || true
+          if [ -d tests ]; then
+            if [[ "${{ needs.validate.outputs.branch }}" == block/* ]]; then
+              echo "🧪 Uitvoeren van specifieke Block/Unit Tests..."
+              pytest tests/unit/ -v --tb=short || pytest tests/ -m unit -v || true
+            else
+              echo "🧪 Uitvoeren van volledige Test Suite..."
+              pytest tests/ -v --tb=short || true
+            fi
+          else
+            echo "ℹ️ Geen tests-map gevonden, overslaan."
+          fi
 
   # ─────────────────────────────────────────
-  # 5. DEPLOY frontend → GitHub Pages
-  #    Alleen vanuit tenant/* branches
+  # 5. DEPLOY frontend (Productie, Acceptatie & Block Previews)
   # ─────────────────────────────────────────
   deploy-frontend:
     needs: [validate, test]
     runs-on: ubuntu-latest
     if: >
-      (github.event.inputs.action == 'deploy' ||
-      github.event.inputs.action == 'build-test-deploy') &&
-      startsWith(github.ref_name, 'tenant/')
+      needs.validate.outputs.has_frontend == 'true' &&
+      (github.event.inputs.action == 'deploy' || github.event.inputs.action == 'build-test-deploy') &&
+      (startsWith(github.ref_name, 'tenant/') || startsWith(github.ref_name, 'feature/') || startsWith(github.ref_name, 'block/'))
     permissions:
       contents: write
       pages: write
       id-token: write
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v4
 
       - name: Download frontend artifact
-        uses: actions/download-artifact@v4.2.2
+        uses: actions/download-artifact@v4
         with:
           name: frontend-${{ github.event.inputs.tenant_id }}
           path: ./dist
+
+      - name: Controleer inhoud van artifact voor deployment
+        run: |
+          echo "🔍 Inhoud van ./dist die wordt geüpload naar GitHub Pages:"
+          ls -la ./dist
 
       - name: Deploy naar GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./dist
-          destination_dir: tenants/${{ github.event.inputs.tenant_id }}
+          destination_dir: ${{ needs.validate.outputs.deploy_dir }}
+          keep_files: true
 
   # ─────────────────────────────────────────
-  # 6. STATUS terugmelden aan BoardWiki
-  #    BoardWiki triggert zelf de Render deploy
+  # 6. STATUS terugmelden
   # ─────────────────────────────────────────
   notify-boardwiki:
     needs: [validate, build-backend, build-frontend, test, deploy-frontend]
@@ -203,31 +273,15 @@ jobs:
       - name: Status bepalen
         id: status
         run: |
-          # Bij build-test-deploy: alle jobs moeten geslaagd zijn
-          # Bij build: alleen build jobs
-          ACTION="${{ github.event.inputs.action }}"
+          BACKEND_RES="${{ needs.build-backend.result }}"
+          FRONTEND_RES="${{ needs.build-frontend.result }}"
+          TEST_RES="${{ needs.test.result }}"
+          DEPLOY_RES="${{ needs.deploy-frontend.result }}"
           
-          if [[ "$ACTION" == "build-test-deploy" ]]; then
-            if [[ "${{ needs.deploy-frontend.result }}" == "success" ]]; then
-              echo "status=success" >> $GITHUB_OUTPUT
-            else
-              echo "status=failed" >> $GITHUB_OUTPUT
-            fi
-          elif [[ "$ACTION" == "build" ]]; then
-            if [[ "${{ needs.build-backend.result }}" == "success" && \
-                  "${{ needs.build-frontend.result }}" == "success" ]]; then
-              echo "status=success" >> $GITHUB_OUTPUT
-            else
-              echo "status=failed" >> $GITHUB_OUTPUT
-            fi
-          elif [[ "$ACTION" == "test" ]]; then
-            if [[ "${{ needs.test.result }}" == "success" ]]; then
-              echo "status=success" >> $GITHUB_OUTPUT
-            else
-              echo "status=failed" >> $GITHUB_OUTPUT
-            fi
-          else
+          if [[ "$BACKEND_RES" == "failure" || "$FRONTEND_RES" == "failure" || "$TEST_RES" == "failure" || "$DEPLOY_RES" == "failure" ]]; then
             echo "status=failed" >> $GITHUB_OUTPUT
+          else
+            echo "status=success" >> $GITHUB_OUTPUT
           fi
 
       - name: BoardWiki webhook aanroepen
@@ -239,7 +293,8 @@ jobs:
             "status": "${{ steps.status.outputs.status }}",
             "run_id": "${{ github.run_id }}",
             "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-            "branch": "${{ github.ref_name }}"
+            "branch": "${{ github.ref_name }}",
+            "environment_path": "${{ needs.validate.outputs.deploy_dir }}"
           }
           EOF
           )
